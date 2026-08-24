@@ -1,0 +1,6 @@
+{
+  "name": "DADU — Digitalisasi Data dari Guru",
+  "description": "Platform produktivitas guru multi-institusi terintegrasi: Satu Data, Banyak Kemudahan.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
