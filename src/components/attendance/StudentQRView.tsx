@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import QRCode from 'qrcode';
 import { useData } from '../../context/DataContext';
 import {
@@ -36,26 +36,43 @@ export const StudentQRViewContent: React.FC = () => {
   const [isCameraModalOpen, setIsCameraModalOpen] = useState(false);
   const [verifiedStudent, setVerifiedStudent] = useState<Student | null>(null);
 
-  const filteredStudents = students.filter(s => selectedClassId === 'all' || s.classId === selectedClassId);
+  const filteredStudents = useMemo(() => {
+    return students.filter(s => selectedClassId === 'all' || s.classId === selectedClassId);
+  }, [students, selectedClassId]);
 
   useEffect(() => {
     let isMounted = true;
     const qrLib = (QRCode as any)?.default || QRCode;
 
-    // Generate QR codes for all filtered students safely
-    filteredStudents.forEach(st => {
-      const payload = st.qrToken || `DADU_${st.nis}`;
-      if (typeof qrLib?.toDataURL === 'function') {
-        qrLib
-          .toDataURL(payload, { width: 160, margin: 1, errorCorrectionLevel: 'M' })
-          .then((url: string) => {
-            if (isMounted) {
-              setQrDataUrls(prev => ({ ...prev, [st.id]: url }));
-            }
-          })
-          .catch((err: any) => console.warn('QR Gen warning for student:', st.id, err));
+    if (!filteredStudents.length || typeof qrLib?.toDataURL !== 'function') {
+      return;
+    }
+
+    // Batch generate QR codes to avoid render spam and thread blocking
+    const generateAll = async () => {
+      const urlMap: Record<string, string> = {};
+      await Promise.all(
+        filteredStudents.map(async st => {
+          const payload = st.qrToken || `DADU_${st.nis}`;
+          try {
+            const url = await qrLib.toDataURL(payload, {
+              width: 160,
+              margin: 1,
+              errorCorrectionLevel: 'M',
+            });
+            urlMap[st.id] = url;
+          } catch (err) {
+            console.warn('QR Gen warning for student:', st.id, err);
+          }
+        })
+      );
+
+      if (isMounted) {
+        setQrDataUrls(urlMap);
       }
-    });
+    };
+
+    generateAll();
 
     return () => {
       isMounted = false;

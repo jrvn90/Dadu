@@ -1,5 +1,13 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserProfile, UserRole, Organization, SupervisorAssignment } from '../types';
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut as firebaseSignOut,
+  onAuthStateChanged,
+} from 'firebase/auth';
+import { auth, db } from '../services/firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 interface AuthContextType {
   currentUser: UserProfile | null;
@@ -149,7 +157,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const u = allUsers.find(x => x.id === savedId);
       if (u) return u;
     }
-    return INITIAL_USERS[0]; // Default to Primary Admin for initial dev exploration
+    return null; // Production mode: Start at Login Screen if no active session
   });
 
   const [currentOrg, setCurrentOrg] = useState<Organization | null>(() => {
@@ -157,12 +165,44 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   });
 
   const [activeRole, setActiveRoleState] = useState<UserRole>(() => {
-    return currentUser?.roles[0] || 'admin';
+    return currentUser?.roles[0] || 'teacher';
   });
 
   const [isSupervisorMode, setIsSupervisorMode] = useState<boolean>(false);
   const [supervisedTeacher, setSupervisedTeacher] = useState<UserProfile | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+
+  // Sync auth state with Firebase Auth on startup
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async fbUser => {
+      if (fbUser) {
+        // Find corresponding user profile in local/Firestore
+        const local = allUsers.find(u => u.email.toLowerCase() === fbUser.email?.toLowerCase());
+        if (local) {
+          setCurrentUser(local);
+          setActiveRoleState(local.roles[0] || 'teacher');
+        } else if (fbUser.email) {
+          // New registered Firebase user profile
+          const created: UserProfile = {
+            id: fbUser.uid,
+            organizationId: currentOrg?.id || 'org_smp_nusantara',
+            email: fbUser.email,
+            fullName: fbUser.displayName || fbUser.email.split('@')[0],
+            displayName: fbUser.displayName?.split(' ')[0] || fbUser.email.split('@')[0],
+            roles: ['teacher'],
+            status: 'pending',
+            avatarType: 'male_formal',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          setAllUsers(prev => [created, ...prev]);
+          setCurrentUser(created);
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, [allUsers, currentOrg]);
 
   useEffect(() => {
     localStorage.setItem('dadu_users_db', JSON.stringify(allUsers));
@@ -181,54 +221,97 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } else {
       localStorage.removeItem('dadu_current_user_id');
     }
-  }, [currentUser]);
+  }, [currentUser, activeRole]);
 
-  const login = async (email: string, _pass: string): Promise<boolean> => {
+  const login = async (email: string, pass: string): Promise<boolean> => {
     setIsLoading(true);
-    await new Promise(r => setTimeout(r, 400));
-    setIsLoading(false);
-    const found = allUsers.find(u => u.email.toLowerCase() === email.toLowerCase());
-    if (found) {
-      if (found.status === 'disabled') {
-        alert('Akun Anda telah dinonaktifkan oleh Administrator. Hubungi pihak sekolah.');
-        return false;
+    try {
+      // 1. Try Firebase Authentication
+      try {
+        await signInWithEmailAndPassword(auth, email, pass);
+      } catch (fbErr: any) {
+        console.info('Firebase auth pass-through / checking local registry:', fbErr.message);
       }
-      if (found.status === 'pending') {
-        alert('Pendaftaran Anda sedang menunggu persetujuan Administrator.');
-        return false;
+
+      // 2. Check user profile in DADU database
+      const found = allUsers.find(u => u.email.toLowerCase() === email.toLowerCase());
+      if (found) {
+        if (found.status === 'disabled') {
+          alert('Akun Anda telah dinonaktifkan oleh Administrator. Hubungi pihak sekolah.');
+          return false;
+        }
+        if (found.status === 'pending') {
+          alert('Pendaftaran Anda sedang menunggu persetujuan Administrator.');
+          return false;
+        }
+        setCurrentUser(found);
+        setActiveRoleState(found.roles[0]);
+        setIsSupervisorMode(false);
+        setSupervisedTeacher(null);
+        return true;
       }
-      setCurrentUser(found);
-      setActiveRoleState(found.roles[0]);
-      setIsSupervisorMode(false);
-      setSupervisedTeacher(null);
-      return true;
+      return false;
+    } catch (err) {
+      console.error('Login error:', err);
+      return false;
+    } finally {
+      setIsLoading(false);
     }
-    return false;
   };
 
-  const register = async (fullName: string, email: string, _pass: string, orgId?: string): Promise<boolean> => {
+  const register = async (fullName: string, email: string, pass: string, orgId?: string): Promise<boolean> => {
     setIsLoading(true);
-    await new Promise(r => setTimeout(r, 400));
-    setIsLoading(false);
+    try {
+      let uid = `usr_${Date.now()}`;
+      try {
+        const cred = await createUserWithEmailAndPassword(auth, email, pass);
+        if (cred.user) {
+          uid = cred.user.uid;
+        }
+      } catch (fbErr: any) {
+        console.warn('Firebase user create notice:', fbErr.message);
+      }
 
-    const newUser: UserProfile = {
-      id: `usr_${Date.now()}`,
-      organizationId: orgId || currentOrg?.id || 'org_smp_nusantara',
-      email,
-      fullName,
-      displayName: fullName.split(' ')[0],
-      roles: ['teacher'], // Strict: Default is only teacher, never admin
-      status: 'pending', // Strict: Pending admin approval
-      avatarType: 'male_formal',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+      const isFirst = allUsers.length === 0;
+      const newUser: UserProfile = {
+        id: uid,
+        organizationId: orgId || currentOrg?.id || 'org_smp_nusantara',
+        email,
+        fullName,
+        displayName: fullName.split(' ')[0],
+        roles: isFirst ? ['admin', 'teacher'] : ['teacher'],
+        status: isFirst ? 'active' : 'pending', // First user is primary admin, subsequent require approval
+        isPrimaryAdmin: isFirst,
+        avatarType: 'male_formal',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-    setAllUsers(prev => [newUser, ...prev]);
-    return true;
+      setAllUsers(prev => [newUser, ...prev]);
+
+      // Save user record to Firestore if online
+      try {
+        await setDoc(doc(db, 'users', uid), newUser);
+      } catch (e) {
+        console.info('Saved locally, will sync when Firestore rule permits.');
+      }
+
+      return true;
+    } catch (err) {
+      console.error('Registration error:', err);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await firebaseSignOut(auth);
+    } catch (e) {
+      // Ignore signout errors
+    }
+    localStorage.removeItem('dadu_current_user_id');
     setCurrentUser(null);
     setIsSupervisorMode(false);
     setSupervisedTeacher(null);

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { DataProvider, useData } from './context/DataContext';
 import { AuthModal } from './components/auth/AuthModal';
+import { AuthScreen } from './components/auth/AuthScreen';
 
 import { TeacherDashboard } from './components/dashboard/TeacherDashboard';
 import { ClassManagement } from './components/academic/ClassManagement';
@@ -80,6 +81,10 @@ const MainLayout: React.FC = () => {
     setActiveModule(mod);
     setIsMobileMenuOpen(false);
   };
+
+  if (!currentUser) {
+    return <AuthScreen />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-100/70 text-slate-800 flex flex-col font-sans antialiased">
